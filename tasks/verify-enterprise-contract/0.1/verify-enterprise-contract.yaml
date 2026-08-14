@@ -20,14 +20,14 @@ kind: Task
 metadata:
   name: verify-enterprise-contract
   annotations:
-    tekton.dev/displayName: Verify Enterprise Contract
+    tekton.dev/displayName: Verify Conforma
     tekton.dev/pipelines.minVersion: "0.19"
     tekton.dev/tags: ec, chains, signature, conftest
   labels:
     app.kubernetes.io/version: "0.1"
 
 spec:
-  description: Verify the enterprise contract is met
+  description: Verify the Conforma policy is met
   params:
     - name: IMAGES
       type: string
@@ -59,9 +59,12 @@ spec:
     - name: PUBLIC_KEY
       type: string
       description: >-
-        Public key used to verify signatures. Must be a valid k8s cosign
-        reference, e.g. k8s://my-space/my-secret where my-secret contains
-        the expected cosign.pub attribute.
+        Public key used to verify traditional long-lived signatures. Must be a
+        valid k8s cosign reference, e.g. k8s://my-space/my-secret where
+        my-secret contains the expected cosign.pub attribute. Required for
+        traditional signing key verification. Will be ignored if any of
+        CERTIFICATE_IDENTITY, CERTIFICATE_IDENTITY_REGEXP,
+        CERTIFICATE_OIDC_ISSUER, or CERTIFICATE_OIDC_ISSUER_REGEXP are provided.
       default: ""
 
     - name: REKOR_HOST
@@ -69,10 +72,46 @@ spec:
       description: Rekor host for transparency log lookups
       default: ""
 
+    - name: CERTIFICATE_IDENTITY
+      type: string
+      description: >-
+        Expected identity in the signing certificate for keyless verification.
+        This should be the email or URI that was used when signing.
+        You should provide both CERTIFICATE_OIDC_ISSUER and CERTIFICATE_IDENTITY
+        for keyless verification. The PUBLIC_KEY param will be ignored if this is
+        provided.
+      default: ""
+
+    - name: CERTIFICATE_OIDC_ISSUER
+      type: string
+      description: >-
+        Expected OIDC issuer in the signing certificate for keyless verification.
+        This should match the issuer that provided the identity token used for signing.
+        You should provide both CERTIFICATE_OIDC_ISSUER and CERTIFICATE_IDENTITY for
+        keyless verification. The PUBLIC_KEY param will be ignored if this is provided.
+      default: ""
+
+    - name: CERTIFICATE_IDENTITY_REGEXP
+      type: string
+      description: >-
+        Similar to CERTIFICATE_IDENTITY but the value is a regexp that will be matched.
+        Note that CERTIFICATE_IDENTITY takes precedence over this if both are present.
+      default: ""
+
+    - name: CERTIFICATE_OIDC_ISSUER_REGEXP
+      type: string
+      description: >-
+        Similar to CERTIFICATE_OIDC_ISSUER but a regexp that will be matched. Note that
+        CERTIFICATE_OIDC_ISSUER takes precedence over this if both are present.
+      default: ""
+
     - name: IGNORE_REKOR
       type: string
       description: >-
-        Skip Rekor transparency log checks during validation.
+        Skip Rekor transparency log checks during validation. Compatible with traditional
+        signing secret signature checks only. If any of the CERTIFICATE_* keyless verification
+        params are present, this value is disregarded and Rekor transparency log checks are
+        included.
       default: "false"
 
     - name: TUF_MIRROR
@@ -120,15 +159,40 @@ spec:
       type: string
       description: Run policy checks with the provided time.
       default: "now"
+    - name: ALLOW_PAST_EFFECTIVE_TIME
+      type: string
+      description: Allow setting EFFECTIVE_TIME to a date in the past.
+      default: "false"
     - name: EXTRA_RULE_DATA
       type: string
       description: Merge additional Rego variables into the policy data. Use syntax "key=value,key2=value2..."
       default: ""
 
+    - name: POLICY_BUNDLE_DIGEST
+      type: string
+      description: >-
+        Optional OCI digest to pin the release policy bundle. When provided,
+        the policy configuration is resolved and the reference
+        oci::quay.io/conforma/release-policy:konflux is replaced with
+        oci::quay.io/conforma/release-policy@<digest>. Accepts a full digest
+        (sha256:abc123...) or just the hex hash (abc123...).
+      # For Konflux stability we want to try pinning the policy bundle rather
+      # than use the floating oci::quay.io/conforma/release-policy:konflux tag.
+      # Instead of needing to bump this in hundreds of separate ECPs, we'll do
+      # it here instead. If you don't want this behavior then provide an empty
+      # string value for this param. To update this digest use the script in
+      # hack/update-policy-digest-in-tasks.sh
+      default: "sha256:f904979d405a39a3cc492439b379b4b117c622bbe7126a0e1ba76527ec3ce6a2"
+
     - name: WORKERS
       type: string
       description: Number of parallel workers to use for policy evaluation.
       default: "1"
+
+    - name: EC_USE_OPA
+      type: string
+      description: Use the OPA evaluator instead of the default conftest evaluator. Set to "1" to enable.
+      default: ""
 
     - name: SINGLE_COMPONENT
       description: Reduce the Snapshot to only the component whose build caused the Snapshot to be created
@@ -197,7 +261,8 @@ spec:
           memory: 256Mi
         limits:
           memory: 256Mi
-      image: quay.io/conforma/cli:latest@sha256:7de855ebd9d3c9cb7b50be2216a815227fa2dfc04425cc59d8da82e6af2db0c4
+      image: quay.io/conforma/cli:latest@sha256:b87bab27cdbb6abdc9e41106629a5ae8c5d04c1e2d859d67bc4fc76c5f7f277a
+      imagePullPolicy: IfNotPresent
       command: [ec]
       args:
         - sigstore
@@ -229,56 +294,155 @@ spec:
           value: $(params.SINGLE_COMPONENT_CUSTOM_RESOURCE_NS)
         - name: SNAPSHOT_PATH
           value: $(params.HOMEDIR)/snapshot.json
-      image: quay.io/conforma/cli:latest@sha256:7de855ebd9d3c9cb7b50be2216a815227fa2dfc04425cc59d8da82e6af2db0c4
+      image: quay.io/conforma/cli:latest@sha256:b87bab27cdbb6abdc9e41106629a5ae8c5d04c1e2d859d67bc4fc76c5f7f277a
+      imagePullPolicy: IfNotPresent
       onError: continue # progress even if the step fails so we can see the debug logs
       command: [reduce-snapshot.sh]
 
-    - name: validate
-      image: quay.io/conforma/cli:latest@sha256:7de855ebd9d3c9cb7b50be2216a815227fa2dfc04425cc59d8da82e6af2db0c4
-      onError: continue # progress even if the step fails so we can see the debug logs
-      command: [ec]
-      args:
-        - validate
-        - image
-        - "--images"
-        - "/tekton/home/snapshot.json"
-        - "--policy"
-        - "$(params.POLICY_CONFIGURATION)"
-        - "--public-key"
-        - "$(params.PUBLIC_KEY)"
-        - "--rekor-url"
-        - "$(params.REKOR_HOST)"
-        - "--ignore-rekor=$(params.IGNORE_REKOR)"
-        - "--workers"
-        - "$(params.WORKERS)"
-        # NOTE: The syntax below is required to negate boolean parameters
-        - "--info=$(params.INFO)"
-        # Fresh versions of ec support "--timeout=0" to indicate no timeout, but this would break
-        # the task if it's used with an older version of ec. In an abundance of caution, let's set
-        # an arbitrary high value instead of using 0 here. In future we can change it to 0.
-        # (The reason to not use an explicit timeout for ec is so Tekton can handle the timeouts).
-        - "--timeout=100h"
-        - "--strict=false"
-        - "--show-successes"
-        - "--effective-time=$(params.EFFECTIVE_TIME)"
-        - "--extra-rule-data=$(params.EXTRA_RULE_DATA)"
-        - "--retry-max-wait"
-        - "$(params.RETRY_MAX_WAIT)"
-        - "--retry-max-retry"
-        - "$(params.RETRY_MAX_RETRY)"
-        - "--retry-duration"
-        - "$(params.RETRY_DURATION)"
-        - "--retry-factor"
-        - "$(params.RETRY_FACTOR)"
-        - "--retry-jitter"
-        - "$(params.RETRY_JITTER)"
-        - "--output"
-        - "text=$(params.HOMEDIR)/text-report.txt?show-successes=false"
-        - "--output"
-        - "appstudio=$(results.TEST_OUTPUT.path)"
-        - "--output"
-        - "json=$(params.HOMEDIR)/report-json.json"
+    - name: pin-policy-bundle
+      computeResources:
+        requests:
+          cpu: 100m
+          memory: 256Mi
+        limits:
+          memory: 256Mi
       env:
+        - name: POLICY_CONFIGURATION
+          value: $(params.POLICY_CONFIGURATION)
+        - name: POLICY_BUNDLE_DIGEST
+          value: $(params.POLICY_BUNDLE_DIGEST)
+      image: quay.io/conforma/cli:latest@sha256:b87bab27cdbb6abdc9e41106629a5ae8c5d04c1e2d859d67bc4fc76c5f7f277a
+      imagePullPolicy: IfNotPresent
+      onError: continue
+      command: [pin-konflux-policy-bundle.sh]
+
+    - name: validate
+      image: quay.io/conforma/cli:latest@sha256:b87bab27cdbb6abdc9e41106629a5ae8c5d04c1e2d859d67bc4fc76c5f7f277a
+      imagePullPolicy: IfNotPresent
+      onError: continue # progress even if the step fails so we can see the debug logs
+      script: |
+        #!/bin/bash
+        set -euo pipefail
+
+        # Use policy override file if pin-policy-bundle produced one
+        if [[ -f "${HOMEDIR}/policy-with-pinned-bundle.yaml" ]]; then
+          POLICY_CONFIGURATION="${HOMEDIR}/policy-with-pinned-bundle.yaml"
+        fi
+
+        cmd_args=(
+          validate
+          image
+          --images="${HOMEDIR}/snapshot.json"
+          --policy="${POLICY_CONFIGURATION}"
+        )
+
+        # To keep bash logic as thin as possible we deliberately don't sanitize
+        # these params. If something is wrong or missing let Conforma handle it.
+
+        if [ -n "${CERTIFICATE_IDENTITY}" ] || \
+           [ -n "${CERTIFICATE_OIDC_ISSUER}" ] || \
+           [ -n "${CERTIFICATE_IDENTITY_REGEXP}" ] || \
+           [ -n "${CERTIFICATE_OIDC_ISSUER_REGEXP}" ]; then
+          # If *any* of the above are non-empty assume the intention is to
+          # try keyless verification
+
+          if [ -n "${CERTIFICATE_IDENTITY}" ]; then
+            cmd_args+=(
+              --certificate-identity="${CERTIFICATE_IDENTITY}"
+            )
+          elif [ -n "${CERTIFICATE_IDENTITY_REGEXP}" ]; then
+            cmd_args+=(
+              --certificate-identity-regexp="${CERTIFICATE_IDENTITY_REGEXP}"
+            )
+          fi
+
+          if [ -n "${CERTIFICATE_OIDC_ISSUER}" ]; then
+            cmd_args+=(
+              --certificate-oidc-issuer="${CERTIFICATE_OIDC_ISSUER}"
+            )
+          elif [ -n "${CERTIFICATE_OIDC_ISSUER_REGEXP}" ]; then
+            cmd_args+=(
+              --certificate-oidc-issuer-regexp="${CERTIFICATE_OIDC_ISSUER_REGEXP}"
+            )
+          fi
+
+          # Force --ignore-rekor to false since we need rekor
+          cmd_args+=(
+            --ignore-rekor=false
+          )
+        else
+          # Assume traditional signing secret verification
+          cmd_args+=(
+            --public-key="${PUBLIC_KEY}"
+            --ignore-rekor="${IGNORE_REKOR}"
+          )
+        fi
+
+        cmd_args+=(
+          --rekor-url="${REKOR_HOST}"
+          --workers="${WORKERS}"
+          --info="${INFO}"
+          --timeout=0
+          --strict=false
+          --show-successes=true
+          --show-policy-docs-link=true
+          --effective-time="${EFFECTIVE_TIME}"
+          --allow-past-effective-time="${ALLOW_PAST_EFFECTIVE_TIME}"
+          --extra-rule-data="${EXTRA_RULE_DATA}"
+          --retry-max-wait="${RETRY_MAX_WAIT}"
+          --retry-max-retry="${RETRY_MAX_RETRY}"
+          --retry-duration="${RETRY_DURATION}"
+          --retry-factor="${RETRY_FACTOR}"
+          --retry-jitter="${RETRY_JITTER}"
+          --output="text=${HOMEDIR}/text-report.txt?show-successes=false"
+          --output="json=${HOMEDIR}/report-json.json"
+          --output="appstudio=$(results.TEST_OUTPUT.path)"
+        )
+
+
+        # Execute Conforma with constructed arguments
+        exec ec "${cmd_args[@]}"
+      env:
+        - name: POLICY_CONFIGURATION
+          value: "$(params.POLICY_CONFIGURATION)"
+        - name: PUBLIC_KEY
+          value: "$(params.PUBLIC_KEY)"
+        - name: CERTIFICATE_IDENTITY
+          value: "$(params.CERTIFICATE_IDENTITY)"
+        - name: CERTIFICATE_OIDC_ISSUER
+          value: "$(params.CERTIFICATE_OIDC_ISSUER)"
+        - name: CERTIFICATE_IDENTITY_REGEXP
+          value: "$(params.CERTIFICATE_IDENTITY_REGEXP)"
+        - name: CERTIFICATE_OIDC_ISSUER_REGEXP
+          value: "$(params.CERTIFICATE_OIDC_ISSUER_REGEXP)"
+        - name: REKOR_HOST
+          value: "$(params.REKOR_HOST)"
+        - name: IGNORE_REKOR
+          value: "$(params.IGNORE_REKOR)"
+        - name: WORKERS
+          value: "$(params.WORKERS)"
+        - name: INFO
+          value: "$(params.INFO)"
+        - name: EFFECTIVE_TIME
+          value: "$(params.EFFECTIVE_TIME)"
+        - name: ALLOW_PAST_EFFECTIVE_TIME
+          value: "$(params.ALLOW_PAST_EFFECTIVE_TIME)"
+        - name: EXTRA_RULE_DATA
+          value: "$(params.EXTRA_RULE_DATA)"
+        - name: RETRY_MAX_WAIT
+          value: "$(params.RETRY_MAX_WAIT)"
+        - name: RETRY_MAX_RETRY
+          value: "$(params.RETRY_MAX_RETRY)"
+        - name: RETRY_DURATION
+          value: "$(params.RETRY_DURATION)"
+        - name: RETRY_FACTOR
+          value: "$(params.RETRY_FACTOR)"
+        - name: RETRY_JITTER
+          value: "$(params.RETRY_JITTER)"
+        - name: EC_USE_OPA
+          value: "$(params.EC_USE_OPA)"
+        - name: HOMEDIR
+          value: "$(params.HOMEDIR)"
         - name: SSL_CERT_DIR
           # The Tekton Operator automatically sets the SSL_CERT_DIR env to the value below but,
           # of course, without the $(param.SSL_CERT_DIR) bit. When a Task Step sets it to a
@@ -288,11 +452,6 @@ spec:
           # value expected by Tekton Pipelines. NOTE: If params.SSL_CERT_DIR is empty, the value
           # will contain a trailing ":" - this is ok.
           value: "/tekton-custom-certs:/etc/ssl/certs:/etc/pki/tls/certs:/system/etc/security/cacerts:$(params.SSL_CERT_DIR)"
-        # The EC cache is used to avoid fetching the same image layers from the registry more than
-        # once. However, this is not thread safe. This results in inconsistencies when extracting
-        # files from an image, see https://github.com/conforma/cli/issues/1109
-        - name: EC_CACHE
-          value: "false"
       computeResources:
         requests:
           cpu: 1800m
@@ -312,7 +471,8 @@ spec:
           memory: 256Mi
         limits:
           memory: 256Mi
-      image: quay.io/conforma/cli:latest@sha256:7de855ebd9d3c9cb7b50be2216a815227fa2dfc04425cc59d8da82e6af2db0c4
+      image: quay.io/conforma/cli:latest@sha256:b87bab27cdbb6abdc9e41106629a5ae8c5d04c1e2d859d67bc4fc76c5f7f277a
+      imagePullPolicy: IfNotPresent
       onError: continue  # progress even if the step fails so we can see the debug logs
       command: [sh, -c]
       args:
@@ -331,7 +491,8 @@ spec:
           memory: 256Mi
         limits:
           memory: 256Mi
-      image: quay.io/conforma/cli:latest@sha256:7de855ebd9d3c9cb7b50be2216a815227fa2dfc04425cc59d8da82e6af2db0c4
+      image: quay.io/conforma/cli:latest@sha256:b87bab27cdbb6abdc9e41106629a5ae8c5d04c1e2d859d67bc4fc76c5f7f277a
+      imagePullPolicy: IfNotPresent
       onError: continue  # progress even if the step fails so we can see the debug logs
       command: [jq]
       args:
@@ -345,7 +506,8 @@ spec:
           memory: 256Mi
         limits:
           memory: 256Mi
-      image: quay.io/conforma/cli:latest@sha256:7de855ebd9d3c9cb7b50be2216a815227fa2dfc04425cc59d8da82e6af2db0c4
+      image: quay.io/conforma/cli:latest@sha256:b87bab27cdbb6abdc9e41106629a5ae8c5d04c1e2d859d67bc4fc76c5f7f277a
+      imagePullPolicy: IfNotPresent
       command: [ec]
       args:
         - version
@@ -357,14 +519,16 @@ spec:
           memory: 256Mi
         limits:
           memory: 256Mi
-      image: quay.io/conforma/cli:latest@sha256:7de855ebd9d3c9cb7b50be2216a815227fa2dfc04425cc59d8da82e6af2db0c4
+      image: quay.io/conforma/cli:latest@sha256:b87bab27cdbb6abdc9e41106629a5ae8c5d04c1e2d859d67bc4fc76c5f7f277a
+      imagePullPolicy: IfNotPresent
       command: [jq]
       args:
         - '{policy: .policy, key: .key, "effective-time": .["effective-time"]}'
         - "$(params.HOMEDIR)/report-json.json"
 
     - name: detailed-report
-      image: quay.io/conforma/cli:latest@sha256:7de855ebd9d3c9cb7b50be2216a815227fa2dfc04425cc59d8da82e6af2db0c4
+      image: quay.io/conforma/cli:latest@sha256:b87bab27cdbb6abdc9e41106629a5ae8c5d04c1e2d859d67bc4fc76c5f7f277a
+      imagePullPolicy: IfNotPresent
       onError: continue
       command: ["cat"]
       args:
@@ -377,7 +541,8 @@ spec:
           memory: 256Mi
         limits:
           memory: 256Mi
-      image: quay.io/conforma/cli:latest@sha256:7de855ebd9d3c9cb7b50be2216a815227fa2dfc04425cc59d8da82e6af2db0c4
+      image: quay.io/conforma/cli:latest@sha256:b87bab27cdbb6abdc9e41106629a5ae8c5d04c1e2d859d67bc4fc76c5f7f277a
+      imagePullPolicy: IfNotPresent
       command: [jq]
       args:
         - "--argjson"
