@@ -1,5 +1,5 @@
 ---
-# Copyright The Conforma Contributors
+# Copyright The Enterprise Contract Contributors
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -46,7 +46,7 @@ spec:
         resource) to use. `namespace/name` or `name` syntax supported. If
         namespace is omitted the namespace where the task runs is used.
         You can also specify a policy configuration using a git url, e.g.
-        `github.com/conforma/config//slsa3`.
+        `github.com/enterprise-contract/config//slsa3`.
       default: "enterprise-contract-service/default"
 
     - name: PUBLIC_KEY
@@ -118,11 +118,17 @@ spec:
       description: Merge additional Rego variables into the policy data. Use syntax "key=value,key2=value2..."
       default: ""
 
-    - name: WORKERS
+    - name: TIMEOUT
       type: string
       description: >
-        Number of parallel workers to use for policy evaluation.
-      default: "4"
+        This param is deprecated and will be removed in future. Its value is ignored. EC will
+        be run without a timeout. (If you do want to apply a timeout use the Tekton task timeout.)
+      default: ""
+
+    - name: WORKERS
+      type: string
+      description: Number of parallel workers to use for policy evaluation.
+      default: "1"
 
     - name: SINGLE_COMPONENT
       description: Reduce the Snapshot to only the component whose build caused the Snapshot to be created
@@ -153,72 +159,9 @@ spec:
       type: string
       default: ""
 
-    - name: TRUSTED_ARTIFACTS_EXTRACT_DIR
-      description: Directory to use to extract trusted artifact archive.
-      type: string
-      # need to specify a subfolder during the extract to avoid the error:
-      # tar: .: Cannot change mode to rwxr-sr-x: Operation not permitted
-      default: "/var/workdir/conforma"
-
-    - name: RETRY_DURATION
-      type: string
-      description: Base duration for exponential backoff calculation (e.g., "1s", "500ms")
-      default: "1s"
-
-    - name: RETRY_FACTOR
-      type: string
-      description: Exponential backoff multiplier (e.g., "2.0", "1.5")
-      default: "2.0"
-
-    - name: RETRY_JITTER
-      type: string
-      description: Randomness factor for backoff calculation (0.0-1.0, e.g., "0.1", "0.2")
-      default: "0.1"
-
-    - name: RETRY_MAX_RETRY
-      type: string
-      description: Maximum number of retry attempts
-      default: "3"
-
-    - name: RETRY_MAX_WAIT
-      type: string
-      description: Maximum wait time between retries (e.g., "3s", "10s")
-      default: "3s"
-
-    - name: ENABLE_VSA
-      type: string
-      description: Enable VSA generation
-      default: "false"
-
-    - name: ATTESTATION_FORMAT
-      type: string
-      description: "Attestation format: dsse (signed envelope) or predicate (raw JSON)"
-      default: "dsse"
-
-    - name: VSA_SIGNING_KEY
-      type: string
-      description: "Signing key for format=dsse (k8s:// or file:// URL)"
-      default: ""
-
-    - name: VSA_UPLOAD
-      type: string
-      description: VSA upload destination
-      default: "local@/var/workdir/vsa"
-
-    - name: ociStorage
-      type: string
-      description: OCI storage URL for trusted artifacts
-      default: ""
-
   results:
     - name: TEST_OUTPUT
       description: Short summary of the policy evaluation for each image
-
-    - name: VSA_GENERATED
-      description: Whether VSAs were generated (true/false)
-
-    - name: sourceDataArtifact
-      description: Trusted Artifact URI containing VSA files
 
   stepTemplate:
     volumeMounts:
@@ -232,24 +175,18 @@ spec:
       - name: HOME
         value: "$(params.HOMEDIR)"
 
-    # This is a workaround for a problem observed on a particular cluster where the
-    # use-trusted-artifacts step runs with root user causing a docker credential file
-    # to not be readable in later steps. There might be solution coming related to the
-    # security context constraints on the cluster, but setting this explicitly here
-    # should probably be harmless either way.
-    securityContext:
-      runAsUser: 1001
-
   steps:
     - name: use-trusted-artifact
       args:
         - use
-        - $(params.SOURCE_DATA_ARTIFACT)=$(params.TRUSTED_ARTIFACTS_EXTRACT_DIR)
+        # need to specify a subfolder during the extract to avoid the error:
+        # tar: .: Cannot change mode to rwxr-sr-x: Operation not permitted
+        - $(params.SOURCE_DATA_ARTIFACT)=/var/workdir/$(context.taskRun.uid)
       computeResources: {}
       image: quay.io/redhat-appstudio/build-trusted-artifacts:e02102ede09aa07187cba066ad547a54724e5cf4
 
     - name: initialize-tuf
-      image: quay.io/conforma/cli:latest@sha256:7de855ebd9d3c9cb7b50be2216a815227fa2dfc04425cc59d8da82e6af2db0c4
+      image: quay.io/enterprise-contract/ec-cli:snapshot
       script: |-
         set -euo pipefail
 
@@ -268,7 +205,7 @@ spec:
     - name: reduce
       env:
         - name: SNAPSHOT
-          value: $(params.TRUSTED_ARTIFACTS_EXTRACT_DIR)/$(params.SNAPSHOT_FILENAME)
+          value: /var/workdir/$(context.taskRun.uid)/$(params.SNAPSHOT_FILENAME)
         - name: SINGLE_COMPONENT
           value: $(params.SINGLE_COMPONENT)
         - name: CUSTOM_RESOURCE
@@ -277,72 +214,48 @@ spec:
           value: $(params.SINGLE_COMPONENT_CUSTOM_RESOURCE_NS)
         - name: SNAPSHOT_PATH
           value: $(params.HOMEDIR)/snapshot.json
-      image: quay.io/conforma/cli:latest@sha256:7de855ebd9d3c9cb7b50be2216a815227fa2dfc04425cc59d8da82e6af2db0c4
+      image: quay.io/enterprise-contract/ec-cli:snapshot
       onError: continue # progress even if the step fails so we can see the debug logs
       command: [reduce-snapshot.sh]
 
     - name: validate
-      image: quay.io/conforma/cli:latest@sha256:7de855ebd9d3c9cb7b50be2216a815227fa2dfc04425cc59d8da82e6af2db0c4
+      image: quay.io/enterprise-contract/ec-cli:snapshot
       onError: continue # progress even if the step fails so we can see the debug logs
-      script: |
-        #!/bin/bash
-        set -euo pipefail
-
-        # Build EC arguments array
-        # POLICY_CONFIGURATION is passed via environment variable to safely handle JSON strings
-        EC_ARGS=(
-          validate
-          image
-          --images /tekton/home/snapshot.json
-          --policy "${POLICY_CONFIGURATION}"
-          --public-key "$(params.PUBLIC_KEY)"
-          --rekor-url "$(params.REKOR_HOST)"
-          --ignore-rekor=$(params.IGNORE_REKOR)
-          --workers "$(params.WORKERS)"
-          --info=$(params.INFO)
-          --timeout=100h
-          --strict=false
-          --show-successes
-          --effective-time=$(params.EFFECTIVE_TIME)
-          --extra-rule-data=$(params.EXTRA_RULE_DATA)
-        )
-
-        EC_ARGS+=(
-          --retry-max-wait "$(params.RETRY_MAX_WAIT)"
-          --retry-max-retry "$(params.RETRY_MAX_RETRY)"
-          --retry-duration "$(params.RETRY_DURATION)"
-          --retry-factor "$(params.RETRY_FACTOR)"
-          --retry-jitter "$(params.RETRY_JITTER)"
-          --output "text=$(params.HOMEDIR)/text-report.txt?show-successes=false"
-          --output "appstudio=$(results.TEST_OUTPUT.path)"
-          --output "json=$(params.HOMEDIR)/report-json.json"
-        )
-
-        # Add VSA arguments if enabled
-        if [[ "$(params.ENABLE_VSA)" == "true" ]]; then
-          EC_ARGS+=(--vsa --attestation-format=$(params.ATTESTATION_FORMAT))
-
-          if [[ "$(params.ATTESTATION_FORMAT)" == "dsse" ]]; then
-            if [[ -z "$(params.VSA_SIGNING_KEY)" ]]; then
-              echo "ERROR: VSA_SIGNING_KEY required for format=dsse" >&2
-              exit 1
-            fi
-            EC_ARGS+=(--vsa-signing-key "$(params.VSA_SIGNING_KEY)")
-          fi
-
-          EC_ARGS+=(--vsa-upload "$(params.VSA_UPLOAD)")
-          echo "true" > $(results.VSA_GENERATED.path)
-        else
-          echo "false" > $(results.VSA_GENERATED.path)
-        fi
-
-        # Execute EC with constructed arguments
-        ec "${EC_ARGS[@]}"
+      command: [ec]
+      args:
+        - validate
+        - image
+        - "--verbose"
+        - "--images"
+        - "/tekton/home/snapshot.json"
+        - "--policy"
+        - "$(params.POLICY_CONFIGURATION)"
+        - "--public-key"
+        - "$(params.PUBLIC_KEY)"
+        - "--rekor-url"
+        - "$(params.REKOR_HOST)"
+        - "--ignore-rekor=$(params.IGNORE_REKOR)"
+        - "--workers"
+        - "$(params.WORKERS)"
+        # NOTE: The syntax below is required to negate boolean parameters
+        - "--info=$(params.INFO)"
+        # Fresh versions of ec support "--timeout=0" to indicate no timeout, but this would break
+        # the task if it's used with an older version of ec. In an abundance of caution, let's set
+        # an arbitrary high value instead of using 0 here. In future we can change it to 0.
+        # (The reason to not use an explicit timeout for ec is so Tekton can handle the timeouts).
+        - "--timeout=100h"
+        - "--strict=false"
+        - "--show-successes"
+        - "--effective-time=$(params.EFFECTIVE_TIME)"
+        - "--extra-rule-data=$(params.EXTRA_RULE_DATA)"
+        - "--output"
+        - "text?show-successes=false"
+        - "--output"
+        - "appstudio=$(results.TEST_OUTPUT.path)"
+        - "--output"
+        - "json=$(params.HOMEDIR)/report-json.json"
+        - "--logfile=$(params.HOMEDIR)/debug.log"
       env:
-        # POLICY_CONFIGURATION is passed via environment variable to safely handle JSON strings
-        # This avoids shell quoting issues when Tekton substitutes parameter values directly in scripts
-        - name: POLICY_CONFIGURATION
-          value: "$(params.POLICY_CONFIGURATION)"
         - name: SSL_CERT_DIR
           # The Tekton Operator automatically sets the SSL_CERT_DIR env to the value below but,
           # of course, without the $(param.SSL_CERT_DIR) bit. When a Task Step sets it to a
@@ -354,7 +267,7 @@ spec:
           value: "/tekton-custom-certs:/etc/ssl/certs:/etc/pki/tls/certs:/system/etc/security/cacerts:$(params.SSL_CERT_DIR)"
         # The EC cache is used to avoid fetching the same image layers from the registry more than
         # once. However, this is not thread safe. This results in inconsistencies when extracting
-        # files from an image, see https://github.com/conforma/cli/issues/1109
+        # files from an image, see https://github.com/enterprise-contract/ec-cli/issues/1109
         - name: EC_CACHE
           value: "false"
       computeResources:
@@ -370,48 +283,40 @@ spec:
           readOnly: true
 
     - name: report-json
-      image: quay.io/conforma/cli:latest@sha256:7de855ebd9d3c9cb7b50be2216a815227fa2dfc04425cc59d8da82e6af2db0c4
+      image: quay.io/enterprise-contract/ec-cli:snapshot
       onError: continue  # progress even if the step fails so we can see the debug logs
-      command: [sh, -c]
+      command: [cat]
       args:
-        # Format the JSON output to wrap lines at 8000 characters per line.
-        # The report can get very large, so add some line breaks
-        # rather than print it as a single line. This makes it easier to render
-        # in the UI, easier to copy/paste, and less likely to cause problems
-        # with logging systems or other consumers of the data (assuming they
-        # correctly parse the full output).
-        - "jq . $(params.HOMEDIR)/report-json.json | awk '{gsub(/^ +/, \"\"); acc += length; if (acc >= 8000) { printf \"\\n\"; acc=length } printf $0 }'"
+        - "$(params.HOMEDIR)/report-json.json"
 
     - name: summary
-      image: quay.io/conforma/cli:latest@sha256:7de855ebd9d3c9cb7b50be2216a815227fa2dfc04425cc59d8da82e6af2db0c4
+      image: quay.io/enterprise-contract/ec-cli:snapshot
       onError: continue  # progress even if the step fails so we can see the debug logs
       command: [jq]
       args:
         - "."
         - "$(results.TEST_OUTPUT.path)"
 
+    - name: info
+      image: quay.io/enterprise-contract/ec-cli:snapshot
+      command: [printf]
+      args:
+        - "----- DEBUG OUTPUT -----\n"
+
     - name: version
-      image: quay.io/conforma/cli:latest@sha256:7de855ebd9d3c9cb7b50be2216a815227fa2dfc04425cc59d8da82e6af2db0c4
+      image: quay.io/enterprise-contract/ec-cli:snapshot
       command: [ec]
       args:
         - version
 
-    - name: show-config
-      image: quay.io/conforma/cli:latest@sha256:7de855ebd9d3c9cb7b50be2216a815227fa2dfc04425cc59d8da82e6af2db0c4
-      command: [jq]
+    - name: debug-log
+      image: quay.io/enterprise-contract/ec-cli:snapshot
+      command: [cat]
       args:
-        - '{policy: .policy, key: .key, "effective-time": .["effective-time"]}'
-        - "$(params.HOMEDIR)/report-json.json"
-
-    - name: detailed-report
-      image: quay.io/conforma/cli:latest@sha256:7de855ebd9d3c9cb7b50be2216a815227fa2dfc04425cc59d8da82e6af2db0c4
-      onError: continue
-      command: ["cat"]
-      args:
-        - "$(params.HOMEDIR)/text-report.txt"
+        - "$(params.HOMEDIR)/debug.log"
 
     - name: assert
-      image: quay.io/conforma/cli:latest@sha256:7de855ebd9d3c9cb7b50be2216a815227fa2dfc04425cc59d8da82e6af2db0c4
+      image: quay.io/enterprise-contract/ec-cli:snapshot
       command: [jq]
       args:
         - "--argjson"
@@ -421,35 +326,6 @@ spec:
         - >
           .result == "SUCCESS" or .result == "WARNING" or ($strict | not)
         - "$(results.TEST_OUTPUT.path)"
-
-    - name: create-trusted-artifact
-      when:
-        - input: "$(params.ENABLE_VSA)"
-          operator: in
-          values: ["true"]
-        - input: "$(params.ociStorage)"
-          operator: notin
-          values: ["", "empty"]
-      computeResources:
-        limits:
-          memory: 128Mi
-        requests:
-          memory: 128Mi
-          cpu: 250m
-      ref:
-        resolver: "git"
-        params:
-          - name: url
-            value: "https://github.com/konflux-ci/release-service-catalog"
-          - name: revision
-            value: "development"
-          - name: pathInRepo
-            value: stepactions/create-trusted-artifact/create-trusted-artifact.yaml
-      params:
-        - name: ociStorage
-          value: $(params.ociStorage)
-        - name: workDir
-          value: /var/workdir
 
   volumes:
     - name: trusted-ca
