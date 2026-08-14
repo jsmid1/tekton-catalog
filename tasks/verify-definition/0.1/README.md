@@ -3,7 +3,7 @@
 This task is used to verify any valid YAML or JSON
 
 ## Install the task
-kubectl apply -f https://raw.githubusercontent.com/conforma/cli/main/tasks/verify-definition/0.1/verify-definition.yaml
+kubectl apply -f https://raw.githubusercontent.com/enterprise-contract/ec-cli/main/tasks/verify-definition/0.1/verify-definition.yaml
 
 ## Parameters
 ### Required
@@ -34,7 +34,7 @@ spec:
   - name: NAMESPACE
     value: policy.task.kind
   - name: POLICY_SOURCE
-    value: git::github.com/conforma/policy//policy/task
+    value: git::github.com/enterprise-contract/ec-policies//policy/task
   resources: {}
   serviceAccountName: default
   taskRef:
