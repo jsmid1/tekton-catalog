@@ -1,5 +1,5 @@
 ---
-# Copyright The Conforma Contributors
+# Copyright The Enterprise Contract Contributors
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -53,7 +53,7 @@ spec:
         resource) to use. `namespace/name` or `name` syntax supported. If
         namespace is omitted the namespace where the task runs is used.
         You can also specify a policy configuration using a git url, e.g.
-        `github.com/conforma/config//slsa3`.
+        `github.com/enterprise-contract/config//slsa3`.
       default: "enterprise-contract-service/default"
 
     - name: PUBLIC_KEY
@@ -125,54 +125,15 @@ spec:
       description: Merge additional Rego variables into the policy data. Use syntax "key=value,key2=value2..."
       default: ""
 
+    - name: TIMEOUT
+      type: string
+      description: Timeout setting for `ec validate`.
+      default: "5m0s"
+
     - name: WORKERS
       type: string
       description: Number of parallel workers to use for policy evaluation.
       default: "1"
-
-    - name: SINGLE_COMPONENT
-      description: Reduce the Snapshot to only the component whose build caused the Snapshot to be created
-      type: string
-      default: "false"
-
-    - name: SINGLE_COMPONENT_CUSTOM_RESOURCE
-      description: >
-        Name, including kind, of the Kubernetes resource to query for labels when single
-        component mode is enabled, e.g. pr/somepipeline.
-      type: string
-      default: "unknown"
-
-    - name: SINGLE_COMPONENT_CUSTOM_RESOURCE_NS
-      description: >
-        Kubernetes namespace where the SINGLE_COMPONENT_NAME is found. Only used
-        when single component mode is enabled.
-      type: string
-      default: ""
-
-    - name: RETRY_DURATION
-      type: string
-      description: Base duration for exponential backoff calculation (e.g., "1s", "500ms")
-      default: "1s"
-
-    - name: RETRY_FACTOR
-      type: string
-      description: Exponential backoff multiplier (e.g., "2.0", "1.5")
-      default: "2.0"
-
-    - name: RETRY_JITTER
-      type: string
-      description: Randomness factor for backoff calculation (0.0-1.0, e.g., "0.1", "0.2")
-      default: "0.1"
-
-    - name: RETRY_MAX_RETRY
-      type: string
-      description: Maximum number of retry attempts
-      default: "3"
-
-    - name: RETRY_MAX_WAIT
-      type: string
-      description: Maximum wait time between retries (e.g., "3s", "10s")
-      default: "3s"
 
   workspaces:
     - name: data
@@ -191,57 +152,32 @@ spec:
   steps:
 
     - name: initialize-tuf
-      computeResources:
-        requests:
-          cpu: 100m
-          memory: 256Mi
-        limits:
-          memory: 256Mi
-      image: quay.io/conforma/cli:latest@sha256:7de855ebd9d3c9cb7b50be2216a815227fa2dfc04425cc59d8da82e6af2db0c4
-      command: [ec]
-      args:
-        - sigstore
-        - initialize
-        - --mirror
-        - $(params.TUF_MIRROR)
-        - --root
-        - $(params.TUF_MIRROR)/root.json
-      when:
-        - input: $(params.TUF_MIRROR)
-          operator: "notin"
-          values: [""]
+      image: quay.io/enterprise-contract/ec-cli:snapshot
+      script: |-
+        set -euo pipefail
 
-    - name: reduce
-      computeResources:
-        requests:
-          cpu: 100m
-          memory: 256Mi
-        limits:
-          memory: 256Mi
+        if [[ -z "${TUF_MIRROR:-}" ]]; then
+            echo 'TUF_MIRROR parameter not provided. Skipping TUF root initialization.'
+            exit
+        fi
+
+        echo 'Initializing TUF root...'
+        ec sigstore initialize --mirror "${TUF_MIRROR}" --root "${TUF_MIRROR}/root.json"
+        echo 'Done!'
       env:
-        - name: SNAPSHOT
-          value: $(params.IMAGES)
-        - name: SINGLE_COMPONENT
-          value: $(params.SINGLE_COMPONENT)
-        - name: CUSTOM_RESOURCE
-          value: $(params.SINGLE_COMPONENT_CUSTOM_RESOURCE)
-        - name: CUSTOM_RESOURCE_NAMESPACE
-          value: $(params.SINGLE_COMPONENT_CUSTOM_RESOURCE_NS)
-        - name: SNAPSHOT_PATH
-          value: $(params.HOMEDIR)/snapshot.json
-      image: quay.io/conforma/cli:latest@sha256:7de855ebd9d3c9cb7b50be2216a815227fa2dfc04425cc59d8da82e6af2db0c4
-      onError: continue # progress even if the step fails so we can see the debug logs
-      command: [reduce-snapshot.sh]
+        - name: TUF_MIRROR
+          value: "$(params.TUF_MIRROR)"
 
     - name: validate
-      image: quay.io/conforma/cli:latest@sha256:7de855ebd9d3c9cb7b50be2216a815227fa2dfc04425cc59d8da82e6af2db0c4
+      image: quay.io/enterprise-contract/ec-cli:snapshot
       onError: continue # progress even if the step fails so we can see the debug logs
       command: [ec]
       args:
         - validate
         - image
+        - "--verbose"
         - "--images"
-        - "/tekton/home/snapshot.json"
+        - "$(params.IMAGES)"
         - "--policy"
         - "$(params.POLICY_CONFIGURATION)"
         - "--public-key"
@@ -253,31 +189,20 @@ spec:
         - "$(params.WORKERS)"
         # NOTE: The syntax below is required to negate boolean parameters
         - "--info=$(params.INFO)"
-        # Fresh versions of ec support "--timeout=0" to indicate no timeout, but this would break
-        # the task if it's used with an older version of ec. In an abundance of caution, let's set
-        # an arbitrary high value instead of using 0 here. In future we can change it to 0.
-        # (The reason to not use an explicit timeout for ec is so Tekton can handle the timeouts).
-        - "--timeout=100h"
+        - "--timeout=$(params.TIMEOUT)"
         - "--strict=false"
         - "--show-successes"
         - "--effective-time=$(params.EFFECTIVE_TIME)"
         - "--extra-rule-data=$(params.EXTRA_RULE_DATA)"
-        - "--retry-max-wait"
-        - "$(params.RETRY_MAX_WAIT)"
-        - "--retry-max-retry"
-        - "$(params.RETRY_MAX_RETRY)"
-        - "--retry-duration"
-        - "$(params.RETRY_DURATION)"
-        - "--retry-factor"
-        - "$(params.RETRY_FACTOR)"
-        - "--retry-jitter"
-        - "$(params.RETRY_JITTER)"
         - "--output"
-        - "text=$(params.HOMEDIR)/text-report.txt?show-successes=false"
+        - "text?show-successes=false"
+        - "--output"
+        - "yaml=$(params.HOMEDIR)/report.yaml"
         - "--output"
         - "appstudio=$(results.TEST_OUTPUT.path)"
         - "--output"
         - "json=$(params.HOMEDIR)/report-json.json"
+        - "--logfile=$(params.HOMEDIR)/debug.log"
       env:
         - name: SSL_CERT_DIR
           # The Tekton Operator automatically sets the SSL_CERT_DIR env to the value below but,
@@ -290,12 +215,12 @@ spec:
           value: "/tekton-custom-certs:/etc/ssl/certs:/etc/pki/tls/certs:/system/etc/security/cacerts:$(params.SSL_CERT_DIR)"
         # The EC cache is used to avoid fetching the same image layers from the registry more than
         # once. However, this is not thread safe. This results in inconsistencies when extracting
-        # files from an image, see https://github.com/conforma/cli/issues/1109
+        # files from an image, see https://github.com/enterprise-contract/ec-cli/issues/1109
         - name: EC_CACHE
           value: "false"
       computeResources:
         requests:
-          cpu: 1800m
+          cpu: 250m
           memory: 2Gi
         limits:
           memory: 2Gi
@@ -305,79 +230,48 @@ spec:
           subPath: ca-bundle.crt
           readOnly: true
 
-    - name: report-json
-      computeResources:
-        requests:
-          cpu: 100m
-          memory: 256Mi
-        limits:
-          memory: 256Mi
-      image: quay.io/conforma/cli:latest@sha256:7de855ebd9d3c9cb7b50be2216a815227fa2dfc04425cc59d8da82e6af2db0c4
+    - name: report
+      image: quay.io/enterprise-contract/ec-cli:snapshot
       onError: continue  # progress even if the step fails so we can see the debug logs
-      command: [sh, -c]
+      command: [cat]
       args:
-        # Format the JSON output to wrap lines at 8000 characters per line.
-        # The report can get very large, so add some line breaks
-        # rather than print it as a single line. This makes it easier to render
-        # in the UI, easier to copy/paste, and less likely to cause problems
-        # with logging systems or other consumers of the data (assuming they
-        # correctly parse the full output).
-        - "jq . $(params.HOMEDIR)/report-json.json | awk '{gsub(/^ +/, \"\"); acc += length; if (acc >= 8000) { printf \"\\n\"; acc=length } printf $0 }'"
+        - "$(params.HOMEDIR)/report.yaml"
+
+    - name: report-json
+      image: quay.io/enterprise-contract/ec-cli:snapshot
+      onError: continue  # progress even if the step fails so we can see the debug logs
+      command: [cat]
+      args:
+        - "$(params.HOMEDIR)/report-json.json"
 
     - name: summary
-      computeResources:
-        requests:
-          cpu: 100m
-          memory: 256Mi
-        limits:
-          memory: 256Mi
-      image: quay.io/conforma/cli:latest@sha256:7de855ebd9d3c9cb7b50be2216a815227fa2dfc04425cc59d8da82e6af2db0c4
+      image: quay.io/enterprise-contract/ec-cli:snapshot
       onError: continue  # progress even if the step fails so we can see the debug logs
       command: [jq]
       args:
         - "."
         - "$(results.TEST_OUTPUT.path)"
 
+    - name: info
+      image: quay.io/enterprise-contract/ec-cli:snapshot
+      command: [printf]
+      args:
+        - "----- DEBUG OUTPUT -----\n"
+
     - name: version
-      computeResources:
-        requests:
-          cpu: 100m
-          memory: 256Mi
-        limits:
-          memory: 256Mi
-      image: quay.io/conforma/cli:latest@sha256:7de855ebd9d3c9cb7b50be2216a815227fa2dfc04425cc59d8da82e6af2db0c4
+      image: quay.io/enterprise-contract/ec-cli:snapshot
       command: [ec]
       args:
         - version
 
-    - name: show-config
-      computeResources:
-        requests:
-          cpu: 100m
-          memory: 256Mi
-        limits:
-          memory: 256Mi
-      image: quay.io/conforma/cli:latest@sha256:7de855ebd9d3c9cb7b50be2216a815227fa2dfc04425cc59d8da82e6af2db0c4
-      command: [jq]
+    - name: debug-log
+      image: quay.io/enterprise-contract/ec-cli:snapshot
+      command: [cat]
       args:
-        - '{policy: .policy, key: .key, "effective-time": .["effective-time"]}'
-        - "$(params.HOMEDIR)/report-json.json"
-
-    - name: detailed-report
-      image: quay.io/conforma/cli:latest@sha256:7de855ebd9d3c9cb7b50be2216a815227fa2dfc04425cc59d8da82e6af2db0c4
-      onError: continue
-      command: ["cat"]
-      args:
-        - "$(params.HOMEDIR)/text-report.txt"
+        - "$(params.HOMEDIR)/debug.log"
 
     - name: assert
-      computeResources:
-        requests:
-          cpu: 100m
-          memory: 256Mi
-        limits:
-          memory: 256Mi
-      image: quay.io/conforma/cli:latest@sha256:7de855ebd9d3c9cb7b50be2216a815227fa2dfc04425cc59d8da82e6af2db0c4
+      image: quay.io/enterprise-contract/ec-cli:snapshot
       command: [jq]
       args:
         - "--argjson"
