@@ -59,14 +59,35 @@ spec:
     - name: PUBLIC_KEY
       type: string
       description: >-
-        Public key used to verify signatures. Must be a valid k8s cosign
-        reference, e.g. k8s://my-space/my-secret where my-secret contains
-        the expected cosign.pub attribute.
+        Public key used to verify traditional long-lived signatures. Must be a
+        valid k8s cosign reference, e.g. k8s://my-space/my-secret where
+        my-secret contains the expected cosign.pub attribute. Required for
+        traditional signing key verification. Will be ignored if either of
+        CERTIFICATE_IDENTITY or CERTIFICATE_OIDC_ISSUER are provided.
       default: ""
 
     - name: REKOR_HOST
       type: string
       description: Rekor host for transparency log lookups
+      default: ""
+
+    - name: CERTIFICATE_IDENTITY
+      type: string
+      description: >-
+        Expected identity in the signing certificate for keyless verification.
+        This should be the email or URI that was used when signing.
+        You should provide both CERTIFICATE_OIDC_ISSUER and CERTIFICATE_IDENTITY
+        for keyless verification. The PUBLIC_KEY param will be ignored if this is
+        provided.
+      default: ""
+
+    - name: CERTIFICATE_OIDC_ISSUER
+      type: string
+      description: >-
+        Expected OIDC issuer in the signing certificate for keyless verification.
+        This should match the issuer that provided the identity token used for signing.
+        You should provide both CERTIFICATE_OIDC_ISSUER and CERTIFICATE_IDENTITY for
+        keyless verification. The PUBLIC_KEY param will be ignored if this is provided.
       default: ""
 
     - name: IGNORE_REKOR
@@ -197,7 +218,7 @@ spec:
           memory: 256Mi
         limits:
           memory: 256Mi
-      image: quay.io/conforma/cli:latest@sha256:7de855ebd9d3c9cb7b50be2216a815227fa2dfc04425cc59d8da82e6af2db0c4
+      image: quay.io/conforma/cli:latest@sha256:b87bab27cdbb6abdc9e41106629a5ae8c5d04c1e2d859d67bc4fc76c5f7f277a
       command: [ec]
       args:
         - sigstore
@@ -229,56 +250,93 @@ spec:
           value: $(params.SINGLE_COMPONENT_CUSTOM_RESOURCE_NS)
         - name: SNAPSHOT_PATH
           value: $(params.HOMEDIR)/snapshot.json
-      image: quay.io/conforma/cli:latest@sha256:7de855ebd9d3c9cb7b50be2216a815227fa2dfc04425cc59d8da82e6af2db0c4
+      image: quay.io/conforma/cli:latest@sha256:b87bab27cdbb6abdc9e41106629a5ae8c5d04c1e2d859d67bc4fc76c5f7f277a
       onError: continue # progress even if the step fails so we can see the debug logs
       command: [reduce-snapshot.sh]
 
     - name: validate
-      image: quay.io/conforma/cli:latest@sha256:7de855ebd9d3c9cb7b50be2216a815227fa2dfc04425cc59d8da82e6af2db0c4
+      image: quay.io/conforma/cli:latest@sha256:b87bab27cdbb6abdc9e41106629a5ae8c5d04c1e2d859d67bc4fc76c5f7f277a
       onError: continue # progress even if the step fails so we can see the debug logs
-      command: [ec]
-      args:
-        - validate
-        - image
-        - "--images"
-        - "/tekton/home/snapshot.json"
-        - "--policy"
-        - "$(params.POLICY_CONFIGURATION)"
-        - "--public-key"
-        - "$(params.PUBLIC_KEY)"
-        - "--rekor-url"
-        - "$(params.REKOR_HOST)"
-        - "--ignore-rekor=$(params.IGNORE_REKOR)"
-        - "--workers"
-        - "$(params.WORKERS)"
-        # NOTE: The syntax below is required to negate boolean parameters
-        - "--info=$(params.INFO)"
-        # Fresh versions of ec support "--timeout=0" to indicate no timeout, but this would break
-        # the task if it's used with an older version of ec. In an abundance of caution, let's set
-        # an arbitrary high value instead of using 0 here. In future we can change it to 0.
-        # (The reason to not use an explicit timeout for ec is so Tekton can handle the timeouts).
-        - "--timeout=100h"
-        - "--strict=false"
-        - "--show-successes"
-        - "--effective-time=$(params.EFFECTIVE_TIME)"
-        - "--extra-rule-data=$(params.EXTRA_RULE_DATA)"
-        - "--retry-max-wait"
-        - "$(params.RETRY_MAX_WAIT)"
-        - "--retry-max-retry"
-        - "$(params.RETRY_MAX_RETRY)"
-        - "--retry-duration"
-        - "$(params.RETRY_DURATION)"
-        - "--retry-factor"
-        - "$(params.RETRY_FACTOR)"
-        - "--retry-jitter"
-        - "$(params.RETRY_JITTER)"
-        - "--output"
-        - "text=$(params.HOMEDIR)/text-report.txt?show-successes=false"
-        - "--output"
-        - "appstudio=$(results.TEST_OUTPUT.path)"
-        - "--output"
-        - "json=$(params.HOMEDIR)/report-json.json"
+      script: |
+        #!/bin/bash
+        set -euo pipefail
+
+        cmd_args=(
+          validate
+          image
+          --images="${HOMEDIR}/snapshot.json"
+          --policy="${POLICY_CONFIGURATION}"
+        )
+
+        # To keep bash logic as thin as possible we deliberately don't sanitize
+        # these params. If something is wrong or missing let Conforma handle it.
+        if [ -n "${CERTIFICATE_IDENTITY}" ] || [ -n "${CERTIFICATE_OIDC_ISSUER}" ]; then
+          cmd_args+=(
+            --certificate-identity="${CERTIFICATE_IDENTITY}"
+            --certificate-oidc-issuer="${CERTIFICATE_OIDC_ISSUER}"
+          )
+        elif [ -n "${PUBLIC_KEY}" ]; then
+          cmd_args+=(
+            --public-key="${PUBLIC_KEY}"
+          )
+        fi
+
+        cmd_args+=(
+          --rekor-url="${REKOR_HOST}"
+          --ignore-rekor="${IGNORE_REKOR}"
+          --workers="${WORKERS}"
+          --info="${INFO}"
+          --timeout=0
+          --strict=false
+          --show-successes=true
+          --effective-time="${EFFECTIVE_TIME}"
+          --extra-rule-data="${EXTRA_RULE_DATA}"
+          --retry-max-wait="${RETRY_MAX_WAIT}"
+          --retry-max-retry="${RETRY_MAX_RETRY}"
+          --retry-duration="${RETRY_DURATION}"
+          --retry-factor="${RETRY_FACTOR}"
+          --retry-jitter="${RETRY_JITTER}"
+          --output="text=${HOMEDIR}/text-report.txt?show-successes=false"
+          --output="json=${HOMEDIR}/report-json.json"
+          --output="appstudio=$(results.TEST_OUTPUT.path)"
+        )
+
+
+        # Execute Conforma with constructed arguments
+        exec ec "${cmd_args[@]}"
       env:
+        - name: POLICY_CONFIGURATION
+          value: "$(params.POLICY_CONFIGURATION)"
+        - name: PUBLIC_KEY
+          value: "$(params.PUBLIC_KEY)"
+        - name: CERTIFICATE_IDENTITY
+          value: "$(params.CERTIFICATE_IDENTITY)"
+        - name: CERTIFICATE_OIDC_ISSUER
+          value: "$(params.CERTIFICATE_OIDC_ISSUER)"
+        - name: REKOR_HOST
+          value: "$(params.REKOR_HOST)"
+        - name: IGNORE_REKOR
+          value: "$(params.IGNORE_REKOR)"
+        - name: WORKERS
+          value: "$(params.WORKERS)"
+        - name: INFO
+          value: "$(params.INFO)"
+        - name: EFFECTIVE_TIME
+          value: "$(params.EFFECTIVE_TIME)"
+        - name: EXTRA_RULE_DATA
+          value: "$(params.EXTRA_RULE_DATA)"
+        - name: RETRY_MAX_WAIT
+          value: "$(params.RETRY_MAX_WAIT)"
+        - name: RETRY_MAX_RETRY
+          value: "$(params.RETRY_MAX_RETRY)"
+        - name: RETRY_DURATION
+          value: "$(params.RETRY_DURATION)"
+        - name: RETRY_FACTOR
+          value: "$(params.RETRY_FACTOR)"
+        - name: RETRY_JITTER
+          value: "$(params.RETRY_JITTER)"
+        - name: HOMEDIR
+          value: "$(params.HOMEDIR)"
         - name: SSL_CERT_DIR
           # The Tekton Operator automatically sets the SSL_CERT_DIR env to the value below but,
           # of course, without the $(param.SSL_CERT_DIR) bit. When a Task Step sets it to a
@@ -312,7 +370,7 @@ spec:
           memory: 256Mi
         limits:
           memory: 256Mi
-      image: quay.io/conforma/cli:latest@sha256:7de855ebd9d3c9cb7b50be2216a815227fa2dfc04425cc59d8da82e6af2db0c4
+      image: quay.io/conforma/cli:latest@sha256:b87bab27cdbb6abdc9e41106629a5ae8c5d04c1e2d859d67bc4fc76c5f7f277a
       onError: continue  # progress even if the step fails so we can see the debug logs
       command: [sh, -c]
       args:
@@ -331,7 +389,7 @@ spec:
           memory: 256Mi
         limits:
           memory: 256Mi
-      image: quay.io/conforma/cli:latest@sha256:7de855ebd9d3c9cb7b50be2216a815227fa2dfc04425cc59d8da82e6af2db0c4
+      image: quay.io/conforma/cli:latest@sha256:b87bab27cdbb6abdc9e41106629a5ae8c5d04c1e2d859d67bc4fc76c5f7f277a
       onError: continue  # progress even if the step fails so we can see the debug logs
       command: [jq]
       args:
@@ -345,7 +403,7 @@ spec:
           memory: 256Mi
         limits:
           memory: 256Mi
-      image: quay.io/conforma/cli:latest@sha256:7de855ebd9d3c9cb7b50be2216a815227fa2dfc04425cc59d8da82e6af2db0c4
+      image: quay.io/conforma/cli:latest@sha256:b87bab27cdbb6abdc9e41106629a5ae8c5d04c1e2d859d67bc4fc76c5f7f277a
       command: [ec]
       args:
         - version
@@ -357,14 +415,14 @@ spec:
           memory: 256Mi
         limits:
           memory: 256Mi
-      image: quay.io/conforma/cli:latest@sha256:7de855ebd9d3c9cb7b50be2216a815227fa2dfc04425cc59d8da82e6af2db0c4
+      image: quay.io/conforma/cli:latest@sha256:b87bab27cdbb6abdc9e41106629a5ae8c5d04c1e2d859d67bc4fc76c5f7f277a
       command: [jq]
       args:
         - '{policy: .policy, key: .key, "effective-time": .["effective-time"]}'
         - "$(params.HOMEDIR)/report-json.json"
 
     - name: detailed-report
-      image: quay.io/conforma/cli:latest@sha256:7de855ebd9d3c9cb7b50be2216a815227fa2dfc04425cc59d8da82e6af2db0c4
+      image: quay.io/conforma/cli:latest@sha256:b87bab27cdbb6abdc9e41106629a5ae8c5d04c1e2d859d67bc4fc76c5f7f277a
       onError: continue
       command: ["cat"]
       args:
@@ -377,7 +435,7 @@ spec:
           memory: 256Mi
         limits:
           memory: 256Mi
-      image: quay.io/conforma/cli:latest@sha256:7de855ebd9d3c9cb7b50be2216a815227fa2dfc04425cc59d8da82e6af2db0c4
+      image: quay.io/conforma/cli:latest@sha256:b87bab27cdbb6abdc9e41106629a5ae8c5d04c1e2d859d67bc4fc76c5f7f277a
       command: [jq]
       args:
         - "--argjson"
