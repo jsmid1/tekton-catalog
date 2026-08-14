@@ -23,7 +23,7 @@ spec:
   description: My custom enterprise contract policy configuration
   sources:
   - data:
-    - git::https://github.com/conforma/policy//example/data
+    - git::https://github.com/enterprise-contract/ec-policies//example/data
     name: ec-policy
     policy:
     - quay.io/enterprise-contract/ec-release-policy:latest
