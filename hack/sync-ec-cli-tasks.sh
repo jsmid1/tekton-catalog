@@ -64,14 +64,23 @@ add_definitions() {
   git checkout "${branch}"
   popd > /dev/null
   git checkout -B "${sync_branch}" --track "${remote_branch}"
+
+  # Remove definitions deleted upstream since cp -r does not handle deletions.
+  for d in tasks/*/; do
+    [[ -d "$d" && ! -d "${EC_CLI_REPO_PATH}/${d}" ]] && git rm -rf "$d" || true
+  done
+
   cp -r "${EC_CLI_REPO_PATH}/tasks" .
   # older release branches don't have pipelines/
   if [[ -d "${EC_CLI_REPO_PATH}/pipelines" ]]; then
+    for d in pipelines/*/; do
+      [[ -d "$d" && ! -d "${EC_CLI_REPO_PATH}/${d}" ]] && git rm -rf "$d" || true
+    done
     cp -r "${EC_CLI_REPO_PATH}/pipelines" .
   fi
   pin_images tasks
   pin_images pipelines
-  diff="$(git diff)"
+  diff="$(git status --porcelain)"
   if [[ -z "${diff}" ]]; then
       echo "No changes to sync for ${branch}"
       return
