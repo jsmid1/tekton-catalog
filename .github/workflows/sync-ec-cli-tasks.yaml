@@ -5,13 +5,17 @@ on:
   workflow_dispatch:
   schedule:
     - cron: '0 6 * * *'
+  push:
+    branches:
+      - EC-2258-verification
 
 permissions:
-  contents: read
+  contents: write
+  pull-requests: write
 
 jobs:
   branches:
-    if: ${{ github.repository == 'conforma/tekton-catalog' }}
+    if: ${{ github.repository == 'jsmid1/tekton-catalog' }}
     runs-on: ubuntu-latest
     outputs:
       branches: ${{ steps.branches.outputs.branches }}
@@ -30,7 +34,7 @@ jobs:
       run: |
         catalog_branches=$(gh api --paginate repos/conforma/tekton-catalog/branches --jq '.[].name' | sort)
         cli_branches=$(gh api --paginate repos/conforma/cli/branches --jq '.[].name' | sort)
-        branches=$(comm -12 <(echo "$catalog_branches") <(echo "$cli_branches") | grep -E '^(main|release-v.*)$')
+        branches=$(comm -12 <(echo "$catalog_branches") <(echo "$cli_branches") | grep -E '^main$')
         echo "branches=$(echo "$branches" | jq -R -s -c 'split("\n") | map(select(length > 0))')" >> "$GITHUB_OUTPUT"
 
   sync-ec-tasks:
@@ -65,21 +69,15 @@ jobs:
       run: ./hack/sync-ec-cli-tasks.sh ../cli
       working-directory: tekton-catalog
 
-    - uses: actions/create-github-app-token@fee1f7d63c2ff003460e3d139729b119787bc349 # v2.2.2
-      id: generate-token
-      with:
-        app-id: ${{ vars.EC_AUTOMATION_APP_ID }}
-        private-key: ${{ secrets.EC_AUTOMATION_KEY }}
-
     - name: Create pull request
       uses: peter-evans/create-pull-request@5f6978faf089d4d20b00c7766989d076bb2fc7f1 # v8.1.1
       with:
         path: tekton-catalog
         base: ${{ matrix.branch }}
-        branch: sync/${{ matrix.branch }}
+        branch: verification/ec-2258-${{ matrix.branch }}
         commit-message: sync ec task and pipeline definitions
         sign-commits: true
         signoff: true
-        title: "chore: sync task and pipeline definitions to ${{ matrix.branch }}"
-        body: "Automated sync of task and pipeline definitions from conforma/cli `${{ matrix.branch }}`."
-        token: ${{ steps.generate-token.outputs.token }}
+        title: "test: verify signed task sync for ${{ matrix.branch }}"
+        body: "Temporary end-to-end verification for EC-2258."
+        token: ${{ github.token }}
